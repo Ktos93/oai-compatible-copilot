@@ -25,13 +25,10 @@
 		"type": "git",
 		"url": "https://github.com/JohnnyZ93/oai-compatible-copilot"
 	},
-	"version": "0.3.5",
+	"version": "0.3.9",
 	"engines": {
 		"vscode": "^1.104.0"
 	},
-	"extensionDependencies": [
-		"github.copilot-chat"
-	],
 	"categories": [
 		"AI",
 		"Chat"
@@ -114,7 +111,19 @@
 		"configuration": {
 			"title": "OAI Compatible Copilot",
 			"properties": {
-				"oaicopilot.baseUrl": {
+				"oaicopilot.logLevel": {
+				"type": "string",
+				"default": "off",
+				"enum": [
+					"off",
+					"debug",
+					"info",
+					"warn",
+					"error"
+				],
+				"description": "Debug log level. Logs are written to ~/.copilot/oaicopilot/logs/ as JSON lines. Default is 'off' (no logging)."
+			},
+			"oaicopilot.baseUrl": {
 					"type": "string",
 					"default": "https://router.huggingface.co/v1",
 					"description": "The base URL for the Openai Compatible Inference API. Default value is Hugging Face."
@@ -187,6 +196,8 @@
 								"type": "string",
 								"default": "medium",
 								"enum": [
+									"max",
+									"xhigh",
 									"high",
 									"medium",
 									"low",
@@ -278,6 +289,8 @@
 										"type": "string",
 										"default": "medium",
 										"enum": [
+											"max",
+											"xhigh",
 											"high",
 											"medium",
 											"low",

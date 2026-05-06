@@ -21,10 +21,11 @@ import type {
 import { isImageMimeType, isToolResultPart, collectToolResultText, convertToolsToOpenAI, mapRole } from "../utils";
 
 import { CommonApi } from "../commonApi";
+import { logger } from "../logger";
 
 export class AnthropicApi extends CommonApi<AnthropicMessage, AnthropicRequestBody> {
-	constructor() {
-		super();
+	constructor(modelId: string) {
+		super(modelId);
 	}
 
 	/**
@@ -131,6 +132,10 @@ export class AnthropicApi extends CommonApi<AnthropicMessage, AnthropicRequestBo
 			} else if (toolResults.length > 0) {
 				// If tool results appear in non-user messages, log warning
 				console.warn("[Anthropic Provider] Tool results found in non-user message, ignoring");
+				logger.warn("anthropic.tool-results.non-user", {
+					messageRole: role,
+					toolResultCount: toolResults.length,
+				});
 			}
 
 			// Only add message if we have content blocks
@@ -219,6 +224,9 @@ export class AnthropicApi extends CommonApi<AnthropicMessage, AnthropicRequestBo
 		progress: Progress<LanguageModelResponsePart2>,
 		token: CancellationToken
 	): Promise<void> {
+		const modelId = this._modelId;
+		logger.debug("anthropic.stream.start", { modelId });
+
 		const reader = responseBody.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
@@ -242,11 +250,12 @@ export class AnthropicApi extends CommonApi<AnthropicMessage, AnthropicRequestBo
 					if (line.trim() === "") {
 						continue;
 					}
-					if (!line.startsWith("data: ")) {
+					if (!line.startsWith("data:")) {
 						continue;
 					}
 
-					const data = line.slice(6);
+					const data = line.slice(5).trim();
+					logger.debug("anthropic.stream.chunk", { modelId, data });
 					if (data === "[DONE]") {
 						// Do not throw on [DONE]; any incomplete/empty buffers are ignored.
 						await this.flushToolCallBuffers(progress, /*throwOnInvalid*/ false);
@@ -255,14 +264,22 @@ export class AnthropicApi extends CommonApi<AnthropicMessage, AnthropicRequestBo
 
 					try {
 						const chunk: AnthropicStreamChunk = JSON.parse(data);
-						// console.debug("[OAI Compatible Model Provider] data:", JSON.stringify(chunk));
-
 						await this.processAnthropicChunk(chunk, progress);
 					} catch (e) {
 						console.error("[Anthropic Provider] Failed to parse SSE chunk:", e, "data:", data);
+						logger.error("anthropic.stream.chunk.error", {
+							modelId,
+							error: e instanceof Error ? e.message : String(e),
+							data,
+						});
 					}
 				}
 			}
+			logger.debug("anthropic.stream.done", { modelId });
+		} catch (e) {
+			console.error("[Anthropic Provider] Streaming response error:", e);
+			logger.error("anthropic.stream.error", { modelId, error: e instanceof Error ? e.message : String(e) });
+			throw e;
 		} finally {
 			reader.releaseLock();
 			// If there's an active thinking sequence, end it first
@@ -423,9 +440,9 @@ export class AnthropicApi extends CommonApi<AnthropicMessage, AnthropicRequestBo
 
 				for (const line of lines) {
 					if (line.trim() === "") continue;
-					if (!line.startsWith("data: ")) continue;
+					if (!line.startsWith("data:")) continue;
 
-					const data = line.slice(6);
+					const data = line.slice(5).trim();
 					if (data === "[DONE]") continue;
 
 					try {

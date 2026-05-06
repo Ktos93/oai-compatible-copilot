@@ -11,6 +11,7 @@ import type { HFModelItem } from "../types";
 import type { OpenAIFunctionToolDef } from "../openai/openaiTypes";
 
 import { CommonApi } from "../commonApi";
+import { logger } from "../logger";
 
 import {
 	isImageMimeType,
@@ -40,7 +41,7 @@ export interface GeminiToolCallMeta {
 	createdAt: number;
 }
 
-const UNSUPPORTED_GEMINI_SCHEMA_KEYS = new Set(["exclusiveMinimum", "exclusiveMaximum"]);
+const UNSUPPORTED_GEMINI_SCHEMA_KEYS = new Set(["exclusiveMinimum", "exclusiveMaximum", "enumDescriptions"]);
 
 function stripUnsupportedGeminiSchemaKeys(value: unknown): number {
 	if (!value) {
@@ -486,8 +487,11 @@ function openaiToolChoiceToGeminiToolConfig(toolChoice: unknown): GeminiToolConf
 }
 
 export class GeminiApi extends CommonApi<GeminiChatMessage, GeminiGenerateContentRequest> {
-	constructor(private readonly toolCallMetaByCallId?: Map<string, GeminiToolCallMeta>) {
-		super();
+	constructor(
+		modelId: string,
+		private readonly toolCallMetaByCallId?: Map<string, GeminiToolCallMeta>
+	) {
+		super(modelId);
 	}
 
 	convertMessages(
@@ -549,9 +553,9 @@ export class GeminiApi extends CommonApi<GeminiChatMessage, GeminiGenerateConten
 		}): boolean => {
 			return Boolean(
 				extracted.toolResults.length > 0 &&
-					!extracted.text &&
-					extracted.imageParts.length === 0 &&
-					extracted.toolCalls.length === 0
+				!extracted.text &&
+				extracted.imageParts.length === 0 &&
+				extracted.toolCalls.length === 0
 			);
 		};
 
@@ -761,6 +765,8 @@ export class GeminiApi extends CommonApi<GeminiChatMessage, GeminiGenerateConten
 		progress: Progress<LanguageModelResponsePart2>,
 		token: CancellationToken
 	): Promise<void> {
+		const modelId = this._modelId;
+		logger.debug("gemini.stream.start", { modelId });
 		const reader = responseBody.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
@@ -791,6 +797,7 @@ export class GeminiApi extends CommonApi<GeminiChatMessage, GeminiGenerateConten
 						continue;
 					}
 					const data = line.slice(5).trim();
+					logger.debug("gemini.stream.chunk", { modelId, data });
 					if (!data || data === "[DONE]") {
 						continue;
 					}
@@ -798,7 +805,13 @@ export class GeminiApi extends CommonApi<GeminiChatMessage, GeminiGenerateConten
 					let payload: GeminiGenerateContentResponse | null = null;
 					try {
 						payload = JSON.parse(data) as GeminiGenerateContentResponse;
-					} catch {
+					} catch (e) {
+						console.error("[Gemini Provider] Failed to parse streaming chunk:", e, "data:", data);
+						logger.error("gemini.stream.chunk.error", {
+							modelId,
+							error: e instanceof Error ? e.message : String(e),
+							data,
+						});
 						continue;
 					}
 					if (!payload) {
@@ -983,6 +996,11 @@ export class GeminiApi extends CommonApi<GeminiChatMessage, GeminiGenerateConten
 					}
 				}
 			}
+			logger.debug("gemini.stream.done", { modelId });
+		} catch (e) {
+			console.error("[Gemini Provider] Streaming response error:", e);
+			logger.error("gemini.stream.error", { modelId, error: e instanceof Error ? e.message : String(e) });
+			throw e;
 		} finally {
 			reader.releaseLock();
 			this.reportEndThinking(progress);

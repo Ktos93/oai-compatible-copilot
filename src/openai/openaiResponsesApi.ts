@@ -20,6 +20,7 @@ import {
 } from "../utils";
 
 import { CommonApi } from "../commonApi";
+import { logger } from "../logger";
 
 export interface ResponsesInputMessage {
 	role: "user" | "assistant" | "system";
@@ -69,8 +70,8 @@ export type ResponsesInputItem =
 export class OpenaiResponsesApi extends CommonApi<ResponsesInputItem, Record<string, unknown>> {
 	private _responseId: string | null = null;
 
-	constructor() {
-		super();
+	constructor(modelId: string) {
+		super(modelId);
 	}
 
 	get responseId(): string | null {
@@ -290,6 +291,8 @@ export class OpenaiResponsesApi extends CommonApi<ResponsesInputItem, Record<str
 		token: CancellationToken
 	): Promise<void> {
 		this._responseId = null;
+		const modelId = this._modelId;
+		logger.debug("responses.stream.start", { modelId });
 		const reader = responseBody.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
@@ -314,6 +317,7 @@ export class OpenaiResponsesApi extends CommonApi<ResponsesInputItem, Record<str
 						continue;
 					}
 					const data = line.slice(5).trim();
+					logger.debug("responses.stream.chunk", { modelId, data });
 					if (data === "[DONE]") {
 						await this.flushToolCallBuffers(progress, false);
 						continue;
@@ -322,11 +326,21 @@ export class OpenaiResponsesApi extends CommonApi<ResponsesInputItem, Record<str
 					try {
 						const parsed = JSON.parse(data) as Record<string, unknown>;
 						await this.processEvent(parsed, progress);
-					} catch {
-						// Silently ignore malformed SSE lines
+					} catch (e) {
+						console.error("[OpenAI-Responses Provider] Failed to parse SSE chunk:", e, "data:", data);
+						logger.error("responses.stream.chunk.error", {
+							modelId,
+							error: e instanceof Error ? e.message : String(e),
+							data,
+						});
 					}
 				}
 			}
+			logger.debug("responses.stream.done", { modelId, responseId: this._responseId ?? "" });
+		} catch (e) {
+			console.error("[OpenAI-Responses Provider] Streaming response error:", e);
+			logger.error("responses.stream.error", { modelId, error: e instanceof Error ? e.message : String(e) });
+			throw e;
 		} finally {
 			reader.releaseLock();
 			this.reportEndThinking(progress);
@@ -740,8 +754,8 @@ export class OpenaiResponsesApi extends CommonApi<ResponsesInputItem, Record<str
 						if (parsed.done || parsed.type === "response.completed" || parsed.type === "response.done") {
 							break;
 						}
-					} catch {
-						// Silently ignore malformed SSE lines
+					} catch (e) {
+						console.error("[OpenAI-Responses Provider] Failed to parse SSE chunk:", e, "data:", data);
 					}
 				}
 			}
