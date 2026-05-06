@@ -27,6 +27,20 @@ import { CommonApi } from "../commonApi";
 import { logger } from "../logger";
 
 export class OpenaiApi extends CommonApi<OpenAIChatMessage, Record<string, unknown>> {
+	private static readonly TC_JSON_START_RE = /<tool_call>\s*\{/g;
+	private static readonly TC_FUNC_START_RE = /<function=(\w+)>\s*/g;
+	private static readonly TC_END_TAG_RE = /<\/tool_call>/;
+	private static readonly TC_FUNC_CLOSE_RE = /\s*<\/function>\s*$/;
+	private static readonly TC_PARAM_START_RE = /<parameter=(\w+)>\s*/g;
+	private static readonly TC_PARAM_CLOSE_RE = /\s*<\/parameter>\s*$/;
+	private static readonly TOOL_XML_SIGNALS = ["<tool_call>", "<function="];
+	private static readonly MAX_TOOL_PREFIX_BUFFER = 32;
+	private _toolHealState: "buffering" | "streaming" | "draining" = "buffering";
+	private _toolHealPrefixBuffer = "";
+	private _toolHealContentAccum = "";
+	private _toolHealFullContentAccum = "";
+	private _healedToolCallsEmitted = false;
+
 	constructor(modelId: string) {
 		super(modelId);
 	}
@@ -273,6 +287,7 @@ export class OpenaiApi extends CommonApi<OpenAIChatMessage, Record<string, unkno
 		const reader = responseBody.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
+		this.resetToolHealingState();
 
 		try {
 			while (true) {
@@ -315,6 +330,42 @@ export class OpenaiApi extends CommonApi<OpenAIChatMessage, Record<string, unkno
 				}
 			}
 			logger.debug("openai.stream.done", { modelId });
+			if (this._toolHealState === "draining" && !this._healedToolCallsEmitted) {
+				const healed = OpenaiApi.parseToolCallsFromText(this._toolHealContentAccum);
+				for (const tc of healed) {
+					const toolName = tc.function.name;
+					if (!toolName) {
+						continue;
+					}
+					const parsedArgs = this.parseToolArguments(tc.function.arguments);
+					if (!parsedArgs) {
+						continue;
+					}
+					progress.report(new vscode.LanguageModelToolCallPart(tc.id, toolName, parsedArgs));
+				}
+				if (healed.length > 0) {
+					this._healedToolCallsEmitted = true;
+				}
+			}
+			if (!this._healedToolCallsEmitted) {
+				const healedFromFull = OpenaiApi.parseToolCallsFromText(this._toolHealFullContentAccum);
+				for (const tc of healedFromFull) {
+					const toolName = tc.function.name;
+					if (!toolName) {
+						continue;
+					}
+					const parsedArgs = this.parseToolArguments(tc.function.arguments);
+					if (!parsedArgs) {
+						continue;
+					}
+					progress.report(new vscode.LanguageModelToolCallPart(tc.id, toolName, parsedArgs));
+				}
+				if (healedFromFull.length > 0) {
+					this._healedToolCallsEmitted = true;
+				}
+			}
+			// Some providers omit finish_reason and/or [DONE], so finalize buffered tool calls here too.
+			await this.flushToolCallBuffers(progress, /*throwOnInvalid*/ false);
 		} catch (e) {
 			console.error("[OpenAI Provider] Streaming response error:", e);
 			logger.error("openai.stream.error", { modelId, error: e instanceof Error ? e.message : String(e) });
@@ -417,6 +468,65 @@ export class OpenaiApi extends CommonApi<OpenAIChatMessage, Record<string, unkno
 
 		if (deltaObj?.content) {
 			const content = String(deltaObj.content);
+			this._toolHealFullContentAccum += content;
+
+			if (this._toolHealState !== "streaming") {
+				this._toolHealContentAccum += content;
+			}
+
+			if (this._toolHealState === "buffering") {
+				this._toolHealPrefixBuffer += content;
+				const check = this._toolHealPrefixBuffer.trimStart();
+				const hasExact = OpenaiApi.TOOL_XML_SIGNALS.some((s) => check.startsWith(s));
+				const hasPossiblePrefix =
+					check.length < OpenaiApi.MAX_TOOL_PREFIX_BUFFER && OpenaiApi.TOOL_XML_SIGNALS.some((s) => s.startsWith(check));
+				if (hasExact) {
+					this._toolHealState = "draining";
+					return emitted;
+				}
+				if (hasPossiblePrefix) {
+					return emitted;
+				}
+
+				this._toolHealState = "streaming";
+				const flushed = this._toolHealPrefixBuffer;
+				this._toolHealPrefixBuffer = "";
+				const xmlResBuffered = this.processXmlThinkBlocks(flushed, progress);
+				if (xmlResBuffered.emittedAny) {
+					emitted = true;
+					return emitted;
+				}
+				this.reportEndThinking(progress);
+				const textResBuffered = this.processTextContent(flushed, progress);
+				if (textResBuffered.emittedAny) {
+					this._hasEmittedAssistantText = true;
+					emitted = true;
+				}
+				return emitted;
+			}
+
+			if (this._toolHealState === "draining") {
+				return emitted;
+			}
+
+			const recoveredToolCalls = OpenaiApi.parseToolCallsFromText(content);
+			if (recoveredToolCalls.length > 0) {
+				for (const tc of recoveredToolCalls) {
+					const toolName = tc.function.name;
+					if (!toolName) {
+						continue;
+					}
+
+					const parsedArgs = this.parseToolArguments(tc.function.arguments);
+					if (!parsedArgs) {
+						continue;
+					}
+
+					progress.report(new vscode.LanguageModelToolCallPart(tc.id, toolName, parsedArgs));
+					emitted = true;
+				}
+				return emitted;
+			}
 
 			// Process XML think blocks or text content (mutually exclusive)
 			const xmlRes = this.processXmlThinkBlocks(content, progress);
@@ -473,11 +583,170 @@ export class OpenaiApi extends CommonApi<OpenAIChatMessage, Record<string, unkno
 		}
 
 		const finish = (choice.finish_reason as string | undefined) ?? undefined;
+		if (finish === "tool_calls" && this._toolHealState === "draining" && !this._healedToolCallsEmitted) {
+			const healed = OpenaiApi.parseToolCallsFromText(this._toolHealContentAccum);
+			for (const tc of healed) {
+				const toolName = tc.function.name;
+				if (!toolName) {
+					continue;
+				}
+				const parsedArgs = this.parseToolArguments(tc.function.arguments);
+				if (!parsedArgs) {
+					continue;
+				}
+				progress.report(new vscode.LanguageModelToolCallPart(tc.id, toolName, parsedArgs));
+				emitted = true;
+			}
+			if (healed.length > 0) {
+				this._healedToolCallsEmitted = true;
+			}
+		}
+
+		if ((finish === "tool_calls" || finish === "stop") && !this._healedToolCallsEmitted) {
+			const healedFromFull = OpenaiApi.parseToolCallsFromText(this._toolHealFullContentAccum);
+			for (const tc of healedFromFull) {
+				const toolName = tc.function.name;
+				if (!toolName) {
+					continue;
+				}
+				const parsedArgs = this.parseToolArguments(tc.function.arguments);
+				if (!parsedArgs) {
+					continue;
+				}
+				progress.report(new vscode.LanguageModelToolCallPart(tc.id, toolName, parsedArgs));
+				emitted = true;
+			}
+			if (healedFromFull.length > 0) {
+				this._healedToolCallsEmitted = true;
+			}
+		}
 		if (finish === "tool_calls" || finish === "stop") {
 			// On both 'tool_calls' and 'stop', emit any buffered calls and throw on invalid JSON
 			await this.flushToolCallBuffers(progress, /*throwOnInvalid*/ true);
 		}
 		return emitted;
+	}
+
+	private resetToolHealingState(): void {
+		this._toolHealState = "buffering";
+		this._toolHealPrefixBuffer = "";
+		this._toolHealContentAccum = "";
+		this._toolHealFullContentAccum = "";
+		this._healedToolCallsEmitted = false;
+	}
+
+	private parseToolArguments(args: string): Record<string, unknown> | null {
+		try {
+			const parsed = JSON.parse(args) as unknown;
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+				return {};
+			}
+			return parsed as Record<string, unknown>;
+		} catch {
+			return null;
+		}
+	}
+
+	private static parseToolCallsFromText(content: string): OpenAIToolCall[] {
+		const toolCalls: OpenAIToolCall[] = [];
+
+		for (const m of content.matchAll(this.TC_JSON_START_RE)) {
+			const braceStart = m.index + m[0].length - 1;
+			let depth = 0;
+			let i = braceStart;
+			let inString = false;
+			while (i < content.length) {
+				const ch = content[i];
+				if (inString) {
+					if (ch === "\\" && i + 1 < content.length) {
+						i += 2;
+						continue;
+					}
+					if (ch === '"') {
+						inString = false;
+					}
+				} else if (ch === '"') {
+					inString = true;
+				} else if (ch === "{") {
+					depth += 1;
+				} else if (ch === "}") {
+					depth -= 1;
+					if (depth === 0) {
+						break;
+					}
+				}
+				i += 1;
+			}
+
+			if (depth !== 0) {
+				continue;
+			}
+
+			const jsonStr = content.slice(braceStart, i + 1);
+			try {
+				const obj = JSON.parse(jsonStr) as { name?: string; arguments?: unknown };
+				const args =
+					typeof obj.arguments === "string"
+						? obj.arguments
+						: JSON.stringify((obj.arguments as Record<string, unknown> | undefined) ?? {});
+				toolCalls.push({
+					id: `call_${toolCalls.length}`,
+					type: "function",
+					function: {
+						name: obj.name ?? "",
+						arguments: args,
+					},
+				});
+			} catch {
+				// Ignore malformed fragments.
+			}
+		}
+
+		if (toolCalls.length > 0) {
+			return toolCalls;
+		}
+
+		const funcStarts = Array.from(content.matchAll(this.TC_FUNC_START_RE));
+		for (let idx = 0; idx < funcStarts.length; idx++) {
+			const fm = funcStarts[idx];
+			const funcName = fm[1] ?? "";
+			const bodyStart = (fm.index ?? 0) + fm[0].length;
+			const nextFuncStart = idx + 1 < funcStarts.length ? (funcStarts[idx + 1].index ?? content.length) : content.length;
+			const tail = content.slice(bodyStart);
+			const endTag = tail.match(this.TC_END_TAG_RE);
+			const bodyEnd = Math.min(endTag ? bodyStart + (endTag.index ?? 0) : content.length, nextFuncStart);
+			let body = content.slice(bodyStart, bodyEnd);
+			body = body.replace(this.TC_FUNC_CLOSE_RE, "");
+
+			const argsObj: Record<string, unknown> = {};
+			const params = Array.from(body.matchAll(this.TC_PARAM_START_RE));
+			if (params.length === 1) {
+				const p = params[0];
+				const name = p[1] ?? "arg";
+				const value = body.slice((p.index ?? 0) + p[0].length).replace(this.TC_PARAM_CLOSE_RE, "").trim();
+				argsObj[name] = value;
+			} else {
+				for (let pidx = 0; pidx < params.length; pidx++) {
+					const p = params[pidx];
+					const name = p[1] ?? `arg_${pidx}`;
+					const start = (p.index ?? 0) + p[0].length;
+					const end = pidx + 1 < params.length ? (params[pidx + 1].index ?? body.length) : body.length;
+					const value = body.slice(start, end).replace(this.TC_PARAM_CLOSE_RE, "").trim();
+					argsObj[name] = value;
+				}
+			}
+
+			toolCalls.push({
+				id: `call_${toolCalls.length}`,
+				type: "function",
+				function: {
+					name: funcName,
+					arguments: JSON.stringify(argsObj),
+				},
+			});
+		}
+
+		return toolCalls;
 	}
 
 	async *createMessage(
