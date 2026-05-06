@@ -335,6 +335,11 @@ export abstract class CommonApi<TMessage, TRequestBody> {
 		input: string,
 		progress: Progress<LanguageModelResponsePart2>
 	): { emittedAny: boolean } {
+		// If we've already attempted detection and found no THINK_START, skip processing
+		if (this._xmlThinkDetectionAttempted && !this._xmlThinkActive) {
+			return { emittedAny: false };
+		}
+
 		const THINK_START = "<think>";
 		const THINK_END = "</think>";
 
@@ -346,18 +351,10 @@ export abstract class CommonApi<TMessage, TRequestBody> {
 				// Look for think start tag
 				const startIdx = data.indexOf(THINK_START);
 				if (startIdx === -1) {
+					// No think start found, mark detection as attempted and skip future processing
+					this._xmlThinkDetectionAttempted = true;
 					data = "";
 					break;
-				}
-
-				// Emit visible assistant text before <think> block.
-				if (startIdx > 0) {
-					const visibleText = data.slice(0, startIdx);
-					if (visibleText) {
-						progress.report(new vscode.LanguageModelTextPart(visibleText));
-						this._hasEmittedAssistantText = true;
-						emittedAny = true;
-					}
 				}
 
 				// Found think start tag - mark that we processed XML tags
@@ -386,14 +383,6 @@ export abstract class CommonApi<TMessage, TRequestBody> {
 			emittedAny = true;
 			this._xmlThinkActive = false;
 			data = data.slice(endIdx + THINK_END.length);
-
-			// If there is visible content after </think>, emit it in the same chunk.
-			if (data.length > 0 && !data.includes(THINK_START)) {
-				progress.report(new vscode.LanguageModelTextPart(data));
-				this._hasEmittedAssistantText = true;
-				emittedAny = true;
-				data = "";
-			}
 		}
 
 		return { emittedAny };
