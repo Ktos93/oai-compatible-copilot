@@ -2,31 +2,27 @@ import * as vscode from "vscode";
 import {
 	CancellationToken,
 	LanguageModelChatRequestMessage,
-	ProvideLanguageModelChatResponseOptions,
 	LanguageModelResponsePart2,
 	Progress,
+	ProvideLanguageModelChatResponseOptions,
 } from "vscode";
-
 import type { HFModelItem, ReasoningConfig } from "../types";
-
 import type {
+	ChatMessageContent,
 	OpenAIChatMessage,
 	OpenAIToolCall,
-	ChatMessageContent,
 	ReasoningDetail,
 	ReasoningSummaryDetail,
 	ReasoningTextDetail,
 } from "./openaiTypes";
-
 import {
-	isImageMimeType,
-	createDataUrl,
-	isToolResultPart,
 	collectToolResultText,
 	convertToolsToOpenAI,
+	createDataUrl,
+	isImageMimeType,
+	isToolResultPart,
 	mapRole,
 } from "../utils";
-
 import { CommonApi } from "../commonApi";
 
 export class OpenaiApi extends CommonApi<OpenAIChatMessage, Record<string, unknown>> {
@@ -72,13 +68,13 @@ export class OpenaiApi extends CommonApi<OpenAIChatMessage, Record<string, unkno
 					const content = collectToolResultText(part as { content?: ReadonlyArray<unknown> });
 					toolResults.push({ callId, content });
 				} else if (part instanceof vscode.LanguageModelThinkingPart) {
-					const content = Array.isArray(part.value) ? part.value.join("") : part.value;
+					const content = Array.isArray(part.value) ? part.value.join(" ") : part.value;
 					reasoningParts.push(content);
 				}
 			}
 
-			const joinedText = textParts.join("").trim();
-			const joinedThinking = reasoningParts.join("").trim();
+			const joinedText = textParts.join(" ").trim();
+			const joinedThinking = reasoningParts.join(" ").trim();
 
 			// process assistant message
 			if (role === "assistant") {
@@ -317,22 +313,36 @@ export class OpenaiApi extends CommonApi<OpenAIChatMessage, Record<string, unkno
 		}
 	}
 
-	/**
-	 * Handle a single streamed delta chunk, emitting text and tool call parts.
-	 * @param delta Parsed SSE chunk from the Router.
-	 * @param progress Progress reporter for parts.
-	 */
-	private async processDelta(
-		delta: Record<string, unknown>,
-		progress: Progress<LanguageModelResponsePart2>
-	): Promise<boolean> {
+	private async processDelta(delta: Record<string, unknown>, progress: Progress<LanguageModelResponsePart2>): Promise<boolean> {
 		let emitted = false;
 		const choice = (delta.choices as Record<string, unknown>[] | undefined)?.[0];
 		if (!choice) {
+			const usage = delta.usage as Record<string, unknown> | undefined;
+			if (usage && typeof usage.prompt_tokens === "number" && typeof usage.completion_tokens === "number") {
+				const usageData = {
+					prompt_tokens: usage.prompt_tokens,
+					completion_tokens: usage.completion_tokens,
+					total_tokens: (usage.total_tokens as number | undefined) ?? (usage.prompt_tokens + usage.completion_tokens),
+					cached_tokens: ((usage.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens as number | undefined) ?? 0,
+				};
+				progress.report(new vscode.LanguageModelDataPart(new TextEncoder().encode(JSON.stringify(usageData)), "token_usage"));
+				return true;
+			}
 			return false;
 		}
 
 		const deltaObj = choice.delta as Record<string, unknown> | undefined;
+		const usage = delta.usage as Record<string, unknown> | undefined;
+		if (usage && typeof usage.prompt_tokens === "number" && typeof usage.completion_tokens === "number") {
+			const usageData = {
+				prompt_tokens: usage.prompt_tokens,
+				completion_tokens: usage.completion_tokens,
+				total_tokens: (usage.total_tokens as number | undefined) ?? (usage.prompt_tokens + usage.completion_tokens),
+				cached_tokens: ((usage.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens as number | undefined) ?? 0,
+			};
+			progress.report(new vscode.LanguageModelDataPart(new TextEncoder().encode(JSON.stringify(usageData)), "token_usage"));
+			emitted = true;
+		}
 
 		// Process thinking content first (before regular text content)
 		try {
