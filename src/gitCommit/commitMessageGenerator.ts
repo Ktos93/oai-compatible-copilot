@@ -6,7 +6,6 @@ import { OpenaiResponsesApi } from "../openai/openaiResponsesApi";
 import { AnthropicApi } from "../anthropic/anthropicApi";
 import { OllamaApi } from "../ollama/ollamaApi";
 import { normalizeUserModels } from "../utils";
-import { logger } from "../logger";
 import type { HFModelItem } from "../types";
 
 /**
@@ -145,8 +144,6 @@ async function generateCommitMsgForRepository(secrets: vscode.SecretStorage, rep
 }
 
 async function performCommitMsgGeneration(secrets: vscode.SecretStorage, gitDiff: string, inputBox: any) {
-	const startTime = Date.now();
-	let modelId: string | undefined;
 	try {
 		vscode.commands.executeCommand("setContext", "oaicopilot.isGeneratingCommit", true);
 		const config = vscode.workspace.getConfiguration();
@@ -184,8 +181,6 @@ async function performCommitMsgGeneration(secrets: vscode.SecretStorage, gitDiff
 
 		// Use the first model marked for commit generation
 		const selectedModel = commitModels[0];
-		modelId = selectedModel.id;
-		logger.info("commit.start", { modelId });
 
 		// Get API key for the model's provider
 		const apiKey = await ensureApiKey(secrets, selectedModel.owned_by);
@@ -213,14 +208,14 @@ async function performCommitMsgGeneration(secrets: vscode.SecretStorage, gitDiff
 		const apiMode = selectedModel.apiMode ?? "openai";
 
 		if (apiMode === "anthropic") {
-			apiInstance = new AnthropicApi(modelId);
+			apiInstance = new AnthropicApi();
 		} else if (apiMode === "ollama") {
-			apiInstance = new OllamaApi(modelId);
+			apiInstance = new OllamaApi();
 		} else if (apiMode === "openai-responses") {
-			apiInstance = new OpenaiResponsesApi(modelId);
+			apiInstance = new OpenaiResponsesApi();
 		} else {
 			// Default to OpenAI-compatible API
-			apiInstance = new OpenaiApi(modelId);
+			apiInstance = new OpenaiApi();
 		}
 
 		commitGenerationAbortController = new AbortController();
@@ -235,16 +230,11 @@ async function performCommitMsgGeneration(secrets: vscode.SecretStorage, gitDiff
 			}
 		}
 
-		inputBox.value = removeThinkTags(inputBox.value);
-
 		if (!inputBox.value) {
 			throw new Error("empty API response");
 		}
-
-		logger.info("commit.end", { modelId, durationMs: Date.now() - startTime });
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error);
-		logger.error("commit.error", { modelId: modelId ?? "unknown", error: errorMessage });
 		vscode.window.showErrorMessage(`Failed to generate commit message: ${errorMessage}`);
 	} finally {
 		vscode.commands.executeCommand("setContext", "oaicopilot.isGeneratingCommit", false);
@@ -269,11 +259,6 @@ function extractCommitMessage(str: string): string {
 		.trim();
 }
 
-function removeThinkTags(text: string): string {
-	const regex = /<think>.*?<\/think>/gs;
-	return text.replace(regex, "").trim();
-}
-
 /**
  * Ensure an API key exists in SecretStorage
  * @param provider provider name to get provider-specific API key.
@@ -284,11 +269,6 @@ async function ensureApiKey(secrets: vscode.SecretStorage, provider: string): Pr
 		const normalizedProvider = provider.trim().toLowerCase();
 		const providerKey = `oaicopilot.apiKey.${normalizedProvider}`;
 		apiKey = await secrets.get(providerKey);
-	}
-
-	// Fall back to generic API key
-	if (!apiKey) {
-		apiKey = await secrets.get("oaicopilot.apiKey");
 	}
 
 	return apiKey;

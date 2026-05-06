@@ -14,11 +14,10 @@ import type { OllamaMessage, OllamaRequestBody, OllamaStreamChunk, OllamaToolCal
 import { isToolResultPart, collectToolResultText, convertToolsToOpenAI, mapRole } from "../utils";
 
 import { CommonApi } from "../commonApi";
-import { logger } from "../logger";
 
 export class OllamaApi extends CommonApi<OllamaMessage, OllamaRequestBody> {
-	constructor(modelId: string) {
-		super(modelId);
+	constructor() {
+		super();
 	}
 
 	/**
@@ -163,9 +162,6 @@ export class OllamaApi extends CommonApi<OllamaMessage, OllamaRequestBody> {
 		progress: Progress<LanguageModelResponsePart2>,
 		token: CancellationToken
 	): Promise<void> {
-		const modelId = this._modelId;
-		logger.debug("ollama.stream.start", { modelId });
-
 		const reader = responseBody.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
@@ -192,7 +188,8 @@ export class OllamaApi extends CommonApi<OllamaMessage, OllamaRequestBody> {
 
 					try {
 						const chunk: OllamaStreamChunk = JSON.parse(line);
-						logger.debug("ollama.stream.chunk", { modelId, data: chunk });
+						// console.debug("[OAI Compatible Model Provider] data:", JSON.stringify(chunk));
+
 						await this.processOllamaDelta(chunk, progress);
 
 						// Check if this is the final chunk
@@ -200,21 +197,11 @@ export class OllamaApi extends CommonApi<OllamaMessage, OllamaRequestBody> {
 							// End any active thinking sequence
 							this.reportEndThinking(progress);
 						}
-					} catch (e) {
-						console.error("[Ollama Provider] Failed to parse streaming chunk:", e, "data:", line);
-						logger.error("ollama.stream.chunk.error", {
-							modelId,
-							error: e instanceof Error ? e.message : String(e),
-							data: line,
-						});
+					} catch {
+						// Silently ignore malformed JSON lines
 					}
 				}
 			}
-			logger.debug("ollama.stream.done", { modelId });
-		} catch (e) {
-			console.error("[Ollama Provider] Streaming response error:", e);
-			logger.error("ollama.stream.error", { modelId, error: e instanceof Error ? e.message : String(e) });
-			throw e;
 		} finally {
 			reader.releaseLock();
 			// End any active thinking sequence
@@ -339,8 +326,8 @@ export class OllamaApi extends CommonApi<OllamaMessage, OllamaRequestBody> {
 						if (chunk.done) {
 							break;
 						}
-					} catch (e) {
-						console.error("[Ollama Provider] Failed to parse streaming chunk:", e, "data:", line);
+					} catch {
+						// Silently ignore malformed JSON lines
 					}
 				}
 			}

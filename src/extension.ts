@@ -3,15 +3,11 @@ import { HuggingFaceChatModelProvider } from "./provider";
 import type { HFModelItem } from "./types";
 import { initStatusBar } from "./statusBar";
 import { ConfigViewPanel } from "./views/configView";
-import { logger } from "./logger";
 import { normalizeUserModels } from "./utils";
 import { abortCommitGeneration, generateCommitMsg } from "./gitCommit/commitMessageGenerator";
 import { TokenizerManager } from "./tokenizer/tokenizerManager";
 
 export function activate(context: vscode.ExtensionContext) {
-	// Initialize logger
-	logger.init();
-
 	// Initialize TokenizerManager with extension path
 	TokenizerManager.initialize(context.extensionPath);
 
@@ -114,15 +110,6 @@ export function activate(context: vscode.ExtensionContext) {
 		}),
 		vscode.commands.registerCommand("oaicopilot.abortGitCommitMessage", () => {
 			abortCommitGeneration();
-		})
-	);
-
-	// Watch for logLevel configuration changes
-	context.subscriptions.push(
-		vscode.workspace.onDidChangeConfiguration((e) => {
-			if (e.affectsConfiguration("oaicopilot.logLevel")) {
-				logger.reloadConfig();
-			}
 		})
 	);
 }

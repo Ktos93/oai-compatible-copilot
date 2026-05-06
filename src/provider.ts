@@ -26,7 +26,6 @@ import { AnthropicRequestBody } from "./anthropic/anthropicTypes";
 import { GeminiApi, buildGeminiGenerateContentUrl, type GeminiToolCallMeta } from "./gemini/geminiApi";
 import type { GeminiGenerateContentRequest } from "./gemini/geminiTypes";
 import { CommonApi } from "./commonApi";
-import { logger } from "./logger";
 
 /**
  * VS Code Chat provider backed by Hugging Face Inference Providers.
@@ -106,7 +105,6 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 				}
 			},
 		};
-		const requestStartTime = Date.now();
 		try {
 			// get model config from user settings
 			const config = vscode.workspace.getConfiguration();
@@ -130,17 +128,6 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 				um = userModels.find((um) => um.id === parsedModelId.baseId);
 			}
 
-			// Check if using Ollama native API mode
-			const apiMode = um?.apiMode ?? "openai";
-			const baseUrl = um?.baseUrl || config.get<string>("oaicopilot.baseUrl", "");
-
-			logger.info("request.start", {
-				modelId: model.id,
-				messageCount: messages.length,
-				apiMode,
-				baseUrl,
-			});
-
 			// Prepare model configuration
 			const modelConfig = {
 				includeReasoningInRequest: um?.include_reasoning_in_request ?? false,
@@ -158,11 +145,6 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 				const elapsed = Date.now() - this._lastRequestTime;
 				if (elapsed < delayMs) {
 					const remainingDelay = delayMs - elapsed;
-					logger.debug("request.delay", {
-						delayMs,
-						elapsed,
-						remainingDelay,
-					});
 					await new Promise<void>((resolve) => {
 						const timeout = setTimeout(() => {
 							clearTimeout(timeout);
@@ -177,15 +159,11 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 			const useGenericKey = !um?.baseUrl;
 			const modelApiKey = await this.ensureApiKey(useGenericKey, provider);
 			if (!modelApiKey) {
-				logger.warn("apiKey.missing", {
-					provider: provider ?? "",
-					useGenericKey,
-				});
 				throw new Error("OAI Compatible API key not found");
 			}
 
 			// send chat request
-			const BASE_URL = baseUrl;
+			const BASE_URL = um?.baseUrl || config.get<string>("oaicopilot.baseUrl", "");
 			if (!BASE_URL || !BASE_URL.startsWith("http")) {
 				throw new Error(`Invalid base URL configuration.`);
 			}
@@ -193,17 +171,16 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 			// get retry config
 			const retryConfig = createRetryConfig();
 
+			// Check if using Ollama native API mode
+			const apiMode = um?.apiMode ?? "openai";
+
 			// prepare headers with custom headers if specified
 			const requestHeaders = CommonApi.prepareHeaders(modelApiKey, apiMode, um?.headers);
-			logger.debug("request.headers", {
-				headers: logger.sanitizeHeaders(requestHeaders as Record<string, string>),
-			});
-			logger.debug("request.messages.origin", {
-				messages: messages,
-			});
+
+			// console.debug("[OAI Compatible Model Provider] messages:", JSON.stringify(messages));
 			if (apiMode === "ollama") {
 				// Ollama native API mode
-				const ollamaApi = new OllamaApi(model.id);
+				const ollamaApi = new OllamaApi();
 				const ollamaMessages = ollamaApi.convertMessages(messages, modelConfig);
 
 				let ollamaRequestBody: OllamaRequestBody = {
@@ -212,13 +189,10 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 					stream: true,
 				};
 				ollamaRequestBody = ollamaApi.prepareRequestBody(ollamaRequestBody, um, options);
+				// console.debug("[OAI Compatible Model Provider] RequestBody:", JSON.stringify(ollamaRequestBody));
 
 				// send Ollama chat request with retry
 				const url = `${BASE_URL.replace(/\/+$/, "")}/api/chat`;
-				logger.debug("request.body", {
-					url: url,
-					requestBody: ollamaRequestBody,
-				});
 				const response = await executeWithRetry(async () => {
 					const res = await fetch(url, {
 						method: "POST",
@@ -243,7 +217,7 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 				await ollamaApi.processStreamingResponse(response.body, trackingProgress, token);
 			} else if (apiMode === "anthropic") {
 				// Anthropic API mode
-				const anthropicApi = new AnthropicApi(model.id);
+				const anthropicApi = new AnthropicApi();
 				const anthropicMessages = anthropicApi.convertMessages(messages, modelConfig);
 
 				// requestBody
@@ -253,6 +227,7 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 					stream: true,
 				};
 				requestBody = anthropicApi.prepareRequestBody(requestBody, um, options);
+				// console.debug("[OAI Compatible Model Provider] RequestBody:", JSON.stringify(requestBody));
 
 				// send Anthropic chat request with retry
 				const normalizedBaseUrl = BASE_URL.replace(/\/+$/, "");
@@ -261,7 +236,6 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 				const url = normalizedBaseUrl.endsWith("/v1")
 					? `${normalizedBaseUrl}/messages`
 					: `${normalizedBaseUrl}/v1/messages`;
-				logger.debug("request.body", { url, requestBody });
 				const response = await executeWithRetry(async () => {
 					const res = await fetch(url, {
 						method: "POST",
@@ -286,7 +260,7 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 				await anthropicApi.processStreamingResponse(response.body, trackingProgress, token);
 			} else if (apiMode === "openai-responses") {
 				// OpenAI Responses API mode
-				const openaiResponsesApi = new OpenaiResponsesApi(model.id);
+				const openaiResponsesApi = new OpenaiResponsesApi();
 				const normalizedBaseUrl = BASE_URL.replace(/\/+$/, "");
 				const statefulModelId = parsedModelId.baseId;
 
@@ -320,14 +294,8 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 
 				requestBody = openaiResponsesApi.prepareRequestBody(requestBody, um, options);
 
-				// Add prompt_cache_key to enable OpenAI prompt caching.
-				// Without this parameter, cached_tokens is always 0 even with identical requests.
-				if (!requestBody.prompt_cache_key) {
-					requestBody.prompt_cache_key = `oaicopilot-${parsedModelId.baseId}`;
-				}
 				// send Responses API request with retry
 				const url = `${normalizedBaseUrl}/responses`;
-				logger.debug("request.body", { url, requestBody });
 
 				// If the user explicitly set `previous_response_id` via `extra`, don't apply stateful slicing.
 				let addedPreviousResponseId = false;
@@ -396,7 +364,7 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 				}
 			} else if (apiMode === "gemini") {
 				// Gemini native API mode
-				const geminiApi = new GeminiApi(model.id, this._geminiToolCallMetaByCallId);
+				const geminiApi = new GeminiApi(this._geminiToolCallMetaByCallId);
 				const geminiMessages = geminiApi.convertMessages(messages, modelConfig);
 
 				const systemParts: string[] = [];
@@ -428,7 +396,6 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 				requestBody = geminiApi.prepareRequestBody(requestBody, um, options);
 
 				const url = buildGeminiGenerateContentUrl(BASE_URL, parsedModelId.baseId, true);
-				logger.debug("request.body", { url, requestBody });
 				if (!url) {
 					throw new Error("Invalid Gemini base URL configuration.");
 				}
@@ -457,7 +424,7 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 				await geminiApi.processStreamingResponse(response.body, trackingProgress, token);
 			} else {
 				// OpenAI compatible API mode (default)
-				const openaiApi = new OpenaiApi(model.id);
+				const openaiApi = new OpenaiApi();
 				const openaiMessages = openaiApi.convertMessages(messages, modelConfig);
 
 				// requestBody
@@ -468,10 +435,10 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 					stream_options: { include_usage: true },
 				};
 				requestBody = openaiApi.prepareRequestBody(requestBody, um, options);
+				// console.debug("[OAI Compatible Model Provider] RequestBody:", JSON.stringify(requestBody));
 
 				// send chat request with retry
 				const url = `${BASE_URL.replace(/\/+$/, "")}/chat/completions`;
-				logger.debug("request.body", { url, requestBody });
 				const response = await executeWithRetry(async () => {
 					const res = await fetch(url, {
 						method: "POST",
@@ -501,16 +468,8 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 				messageCount: messages.length,
 				error: err instanceof Error ? { name: err.name, message: err.message } : String(err),
 			});
-			logger.error("request.error", {
-				modelId: model.id,
-				messageCount: messages.length,
-				errorName: err instanceof Error ? err.name : String(err),
-				errorMessage: err instanceof Error ? err.message : String(err),
-			});
 			throw err;
 		} finally {
-			const durationMs = Date.now() - requestStartTime;
-			logger.info("request.end", { modelId: model.id, durationMs });
 			// Update last request time after successful completion
 			this._lastRequestTime = Date.now();
 		}

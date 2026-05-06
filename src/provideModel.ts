@@ -6,7 +6,6 @@ import { normalizeUserModels } from "./utils";
 import { VersionManager } from "./versionManager";
 import { fetchGeminiModels } from "./gemini/geminiApi";
 import { fetchOllamaModels } from "./ollama/ollamaApi";
-import { logger } from "./logger";
 
 const DEFAULT_CONTEXT_LENGTH = 128000;
 const DEFAULT_MAX_TOKENS = 4096;
@@ -130,7 +129,7 @@ export async function prepareLanguageModelChatInformation(
 		});
 	}
 
-	logger.info("models.loaded", { count: infos.length, source: userModels && userModels.length > 0 ? "config" : "api" });
+	// console.debug("[OAI Compatible Model Provider] Loaded models:", infos);
 	return infos;
 }
 
@@ -183,9 +182,7 @@ export async function fetchModels(
 		const models = await modelsList;
 		return { models };
 	} catch (err) {
-		const errorObj = err instanceof Error ? err : new Error(String(err));
 		console.error("[OAI Compatible Model Provider] Failed to fetch OAI Compatible models", err);
-		logger.error("models.fetch.error", { baseUrl, error: errorObj.message });
 		throw err;
 	}
 }

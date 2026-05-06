@@ -50,12 +50,7 @@ export abstract class CommonApi<TMessage, TRequestBody> {
 	/** System prompts to include in requests. */
 	protected _systemContent: string | undefined;
 
-	/** Set the model ID for logging purposes. */
-	protected _modelId = "";
-
-	constructor(modelId: string) {
-		this._modelId = modelId;
-	}
+	constructor() {}
 
 	/**
 	 * Convert VS Code chat messages to specific api message format.
